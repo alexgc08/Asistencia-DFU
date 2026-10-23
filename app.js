@@ -873,48 +873,157 @@ function repDraw(){
 }
 
 /* ========== Usuarios del sistema (solo administrador) ========== */
-R.usuarios=function(){
-  if(sb){view.innerHTML='<div class="card"><h1>Usuarios del sistema</h1><p class="muted">Las cuentas se autentican mediante Supabase. Para crear un usuario nuevo, primero créalo en Supabase Authentication y luego crea su perfil en la tabla <code>profiles</code>. La administración directa de cuentas desde esta pantalla todavía no está habilitada.</p></div>';return;}
-  const st=S.usr;
-  view.innerHTML='<div class="ph"><div><h1>Usuarios del sistema</h1><p class="muted">Cuentas con acceso a esta web. No hay límite de usuarios.</p></div><button class="btn primary" id="add">Nuevo usuario</button></div><div class="tools"><label>Buscar<input id="q" placeholder="Nombre o usuario" value="'+esc(st.q)+'"></label></div><div id="tbl"></div>';
-  $('#q').oninput=e=>{st.q=e.target.value;st.page=1;usrDraw();};
-  $('#add').onclick=userForm;
-  const t=$('#tbl');
-  t.onclick=async e=>{
-    const pg=e.target.closest('[data-pg]');if(pg){st.page=+pg.dataset.pg;usrDraw();return;}
-    const b=e.target.closest('[data-act]');if(!b)return;
-    const u=db.users.find(x=>x.id===b.dataset.u);if(!u)return;
-    if(b.dataset.act==='rv'){recoveryModal(u,u.id===me.id);return;}
-    if(b.dataset.act==='ap'){
-      if(!u.role){toast('Primero elige un rol para esta persona');return;}
-      u.pending=false;u.active=true;save();usrDraw();toast(u.name+' fue aprobado');return;
+
+R.usuarios = async function () {
+  if (!sb) {
+    view.innerHTML =
+      '<div class="card"><h1>Usuarios del sistema</h1>' +
+      '<p class="muted">Supabase no está conectado.</p></div>';
+    return;
+  }
+
+  if (!me || me.role !== 'admin') {
+    view.innerHTML =
+      '<div class="card"><h1>Acceso denegado</h1>' +
+      '<p class="muted">Solo el administrador puede gestionar usuarios.</p></div>';
+    return;
+  }
+
+  view.innerHTML =
+    '<div class="ph"><div><h1>Usuarios del sistema</h1>' +
+    '<p class="muted">Cuentas registradas en Supabase.</p></div>' +
+    '<button class="btn primary" id="add">Nuevo usuario</button></div>' +
+    '<div class="tools"><label>Buscar' +
+    '<input id="q" placeholder="Nombre o usuario"></label></div>' +
+    '<div id="msg" class="muted">Cargando usuarios...</div>' +
+    '<div id="tbl"></div>';
+
+  let users = [];
+  const table = $('#tbl');
+  const msg = $('#msg');
+  const search = $('#q');
+
+  async function callAdmin(action, data = {}) {
+    const { data: sessionData, error: sessionError } =
+      await sb.auth.getSession();
+
+    if (sessionError) throw sessionError;
+
+    const token = sessionData.session?.access_token;
+    if (!token) throw new Error('Tu sesión ha caducado. Vuelve a iniciar sesión.');
+
+    const { data: result, error } = await sb.functions.invoke(
+      'admin-users',
+      { body: { action, ...data } }
+    );
+
+    if (error) throw error;
+    if (result?.error) throw new Error(result.error);
+
+    return result;
+  }
+
+  function drawUsers() {
+    const q = search.value.trim().toLowerCase();
+
+    const filtered = users.filter(u =>
+      [u.username, u.display_name, u.email, u.app_role]
+        .some(v => String(v || '').toLowerCase().includes(q))
+    );
+
+    if (!filtered.length) {
+      table.innerHTML =
+        '<div class="card"><p class="muted">No se encontraron usuarios.</p></div>';
+      return;
     }
-    if(b.dataset.act==='tog'){
-      if(u.id===me.id){toast('No puedes desactivar tu propia cuenta');return;}
-      if(u.role==='admin'&&u.active&&activeAdmins()<=1){toast('Debe existir al menos un administrador activo');return;}
-      u.active=!u.active;save();usrDraw();
-    }else if(b.dataset.act==='del'){
-      if(u.id===me.id){toast('No puedes eliminar tu propia cuenta');return;}
-      if(u.role==='admin'&&u.active&&activeAdmins()<=1){toast('Debe existir al menos un administrador activo');return;}
-      if(!(await confirmDlg('¿Eliminar la cuenta de '+u.name+'?')))return;
-      db.users=db.users.filter(x=>x.id!==u.id);save();usrDraw();toast('Usuario eliminado');
-    }else if(b.dataset.act==='pw'){
-      openModal('Nueva contraseña para '+u.name,'<form id="f" class="stack"><label>Nueva contraseña (mín. 6)<input name="p" type="password" required minlength="6" autocomplete="new-password"></label><div class="row end"><button type="button" class="btn" data-close>Cancelar</button><button class="btn primary">Guardar</button></div></form>',(r,close)=>{
-        $('#f',r).onsubmit=async ev=>{ev.preventDefault();u.pass=await hash(String(new FormData(ev.target).get('p')));save();close();toast('Contraseña actualizada');};
-      });
+
+    table.innerHTML =
+      '<div class="card"><div class="table-wrap"><table>' +
+      '<thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th>' +
+      '<th>Estado</th></tr></thead><tbody>' +
+      filtered.map(u =>
+        '<tr><td>' + esc(u.display_name || '') + '</td>' +
+        '<td>' + esc(u.username || '') + '</td>' +
+        '<td>' + esc(u.app_role || '') + '</td>' +
+        '<td>' + (u.active ? 'Activo' : 'Inactivo') +
+        (u.pending ? ' · Pendiente' : '') + '</td></tr>'
+      ).join('') +
+      '</tbody></table></div></div>';
+  }
+
+  async function loadUsers() {
+    msg.textContent = 'Cargando usuarios...';
+    table.innerHTML = '';
+
+    try {
+      const result = await callAdmin('list');
+      users = result.users || [];
+      msg.textContent = 'Usuarios encontrados: ' + users.length;
+      drawUsers();
+    } catch (error) {
+      msg.textContent =
+        'No se pudieron cargar los usuarios: ' +
+        (error.message || 'Error desconocido');
     }
+  }
+
+  search.oninput = drawUsers;
+
+  $('#add').onclick = () => {
+    openModal(
+      'Nuevo usuario',
+      '<form id="newUser" class="stack">' +
+      '<label>Nombre completo<input name="display_name" required></label>' +
+      '<label>Nombre de usuario<input name="username" required pattern="[a-z0-9_]{3,30}" minlength="3" maxlength="30"></label>' +
+      '<label>Correo electrónico<input name="email" type="email" required></label>' +
+      '<label>Teléfono<input name="phone"></label>' +
+      '<label>Contraseña<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>' +
+      '<label>Rol<select name="app_role" required>' +
+      '<option value="director">Director</option>' +
+      '<option value="registrador">Registrador</option>' +
+      '<option value="admin">Administrador</option>' +
+      '</select></label>' +
+      '<div class="row end"><button type="button" class="btn" data-close>Cancelar</button>' +
+      '<button class="btn primary" type="submit">Crear usuario</button></div>' +
+      '</form>',
+      (root, close) => {
+        const form = $('#newUser', root);
+
+        form.onsubmit = async event => {
+          event.preventDefault();
+
+          const button = form.querySelector('button[type="submit"]');
+          button.disabled = true;
+          button.textContent = 'Creando...';
+
+          const fd = new FormData(form);
+
+          try {
+            await callAdmin('create', {
+              username: String(fd.get('username') || '').trim().toLowerCase(),
+              display_name: String(fd.get('display_name') || '').trim(),
+              email: String(fd.get('email') || '').trim(),
+              phone: String(fd.get('phone') || '').trim(),
+              password: String(fd.get('password') || ''),
+              app_role: String(fd.get('app_role') || '')
+            });
+
+            close();
+            toast('Usuario creado correctamente');
+            await loadUsers();
+          } catch (error) {
+            toast('No se pudo crear: ' + (error.message || 'Error desconocido'));
+            button.disabled = false;
+            button.textContent = 'Crear usuario';
+          }
+        };
+      }
+    );
   };
-  t.onchange=e=>{
-    const s=e.target.closest('select[data-u]');if(!s)return;
-    const u=db.users.find(x=>x.id===s.dataset.u);if(!u)return;
-    if(!s.value){usrDraw();return;}
-    if(u.role==='admin'&&s.value!=='admin'&&u.active&&activeAdmins()<=1){toast('Debe existir al menos un administrador activo');usrDraw();return;}
-    u.role=s.value;save();
-    if(u.id===me.id){me=u;renderApp();return;}
-    usrDraw();toast('Rol actualizado');
-  };
-  usrDraw();
+
+  await loadUsers();
 };
+
 function usrDraw(){
   const st=S.usr,q=st.q.trim().toLowerCase();
   const list=db.users.filter(u=>!q||(u.name+' '+u.username).toLowerCase().indexOf(q)>=0).sort((a,b)=>collator.compare(a.name,b.name));
